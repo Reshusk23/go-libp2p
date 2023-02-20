@@ -38,6 +38,7 @@ import (
 
 	ma "github.com/multiformats/go-multiaddr"
 	madns "github.com/multiformats/go-multiaddr-dns"
+	"github.com/quic-go/quic-go"
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxevent"
 )
@@ -255,7 +256,16 @@ func (cfg *Config) addTransports() ([]fx.Option, error) {
 	if cfg.QUICReuse != nil {
 		fxopts = append(fxopts, cfg.QUICReuse...)
 	} else {
-		fxopts = append(fxopts, fx.Provide(quicreuse.NewConnManager)) // TODO: close the ConnManager when shutting down the node
+		fxopts = append(fxopts,
+			fx.Provide(func(key quic.StatelessResetKey, _ *swarm.Swarm, lifecycle fx.Lifecycle) (*quicreuse.ConnManager, error) {
+				cm, err := quicreuse.NewConnManager(key)
+				if err != nil {
+					return nil, err
+				}
+				lifecycle.Append(fx.StopHook(cm.Close))
+				return cm, nil
+			}),
+		)
 	}
 
 	fxopts = append(fxopts, fx.Invoke(
@@ -328,7 +338,10 @@ func (cfg *Config) NewNode() (host.Host, error) {
 			lifecycle.Append(fx.StopHook(sw.Close))
 			return sw, nil
 		}),
-		fx.Decorate(func(sw *swarm.Swarm, lifecycle fx.Lifecycle) *swarm.Swarm {
+		// Make sure the swarm constructor depends on the quicreuse.ConnManager.
+		// That way, the ConnManager will be started before the swarm, and more importantly,
+		// the swarm will be stopped before the ConnManager.
+		fx.Decorate(func(sw *swarm.Swarm, _ *quicreuse.ConnManager, lifecycle fx.Lifecycle) *swarm.Swarm {
 			lifecycle.Append(fx.Hook{
 				OnStart: func(context.Context) error {
 					// TODO: This method succeeds if listening on one address succeeds. We
