@@ -313,6 +313,9 @@ func (cfg *Config) newBasicHost(swrm *swarm.Swarm, eventBus event.Bus) (*bhost.B
 //
 // This function consumes the config. Do not reuse it (really!).
 func (cfg *Config) NewNode() (host.Host, error) {
+	if cfg.EnableAutoRelay && !cfg.Relay {
+		return nil, fmt.Errorf("cannot enable autorelay; relay is not enabled")
+	}
 	fxopts := []fx.Option{
 		fx.Provide(func() event.Bus {
 			return eventbus.NewBus(eventbus.WithMetricsTracer(eventbus.NewMetricsTracer(eventbus.WithRegisterer(cfg.PrometheusRegisterer))))
@@ -345,10 +348,6 @@ func (cfg *Config) NewNode() (host.Host, error) {
 
 	var h *bhost.BasicHost
 	fxopts = append(fxopts, fx.Invoke(func(ho *bhost.BasicHost) { h = ho }))
-	app := fx.New(fxopts...)
-	if err := app.Start(context.Background()); err != nil {
-		return nil, err
-	}
 
 	// Configure routing and autorelay
 	var router routing.PeerRouting
@@ -362,22 +361,25 @@ func (cfg *Config) NewNode() (host.Host, error) {
 
 	// Note: h.AddrsFactory may be changed by relayFinder, but non-relay version is
 	// used by AutoNAT below.
-	var ar *autorelay.AutoRelay
 	if cfg.EnableAutoRelay {
-		if !cfg.Relay {
-			h.Close()
-			return nil, fmt.Errorf("cannot enable autorelay; relay is not enabled")
-		}
-		if !cfg.DisableMetrics {
-			mt := autorelay.WithMetricsTracer(autorelay.NewMetricsTracer(autorelay.WithRegisterer(cfg.PrometheusRegisterer)))
-			mtOpts := []autorelay.Option{mt}
-			cfg.AutoRelayOpts = append(mtOpts, cfg.AutoRelayOpts...)
-		}
+		mt := autorelay.WithMetricsTracer(autorelay.NewMetricsTracer(autorelay.WithRegisterer(cfg.PrometheusRegisterer)))
+		mtOpts := []autorelay.Option{mt}
+		autoRelayOpts := append(mtOpts, cfg.AutoRelayOpts...)
+		fxopts = append(fxopts,
+			fx.Invoke(func(h *bhost.BasicHost, lifecycle fx.Lifecycle) (*autorelay.AutoRelay, error) {
+				ar, err := autorelay.NewAutoRelay(h, autoRelayOpts...)
+				if err != nil {
+					return nil, err
+				}
+				lifecycle.Append(fx.StartStopHook(ar.Start, ar.Close))
+				return ar, nil
+			}),
+		)
+	}
 
-		ar, err = autorelay.NewAutoRelay(h, cfg.AutoRelayOpts...)
-		if err != nil {
-			return nil, err
-		}
+	app := fx.New(fxopts...)
+	if err := app.Start(context.Background()); err != nil {
+		return nil, err
 	}
 
 	if err := cfg.addAutoNAT(h); err != nil {
@@ -390,12 +392,7 @@ func (cfg *Config) NewNode() (host.Host, error) {
 	if router != nil {
 		ho = routed.Wrap(h, router)
 	}
-	if ar != nil {
-		arh := autorelay.NewAutoRelayHost(ho, ar)
-		arh.Start()
-		return arh, nil
-	}
-	return ho, nil
+	return &closableHost{App: app, Host: ho}, nil
 }
 
 func (cfg *Config) addAutoNAT(h *bhost.BasicHost) error {
