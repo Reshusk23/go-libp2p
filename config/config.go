@@ -320,7 +320,14 @@ func (cfg *Config) NewNode() (host.Host, error) {
 		fx.Provide(func() event.Bus {
 			return eventbus.NewBus(eventbus.WithMetricsTracer(eventbus.NewMetricsTracer(eventbus.WithRegisterer(cfg.PrometheusRegisterer))))
 		}),
-		fx.Provide(func(eventBus event.Bus) (*swarm.Swarm, error) { return cfg.makeSwarm(eventBus, !cfg.DisableMetrics) }),
+		fx.Provide(func(eventBus event.Bus, lifecycle fx.Lifecycle) (*swarm.Swarm, error) {
+			sw, err := cfg.makeSwarm(eventBus, !cfg.DisableMetrics)
+			if err != nil {
+				return nil, err
+			}
+			lifecycle.Append(fx.StopHook(sw.Close))
+			return sw, nil
+		}),
 		fx.Decorate(func(sw *swarm.Swarm, lifecycle fx.Lifecycle) *swarm.Swarm {
 			lifecycle.Append(fx.Hook{
 				OnStart: func(context.Context) error {
