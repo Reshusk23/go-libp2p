@@ -346,17 +346,12 @@ func (cfg *Config) NewNode() (host.Host, error) {
 	}
 	fxopts = append(fxopts, transportOpts...)
 
-	var h *bhost.BasicHost
-	fxopts = append(fxopts, fx.Invoke(func(ho *bhost.BasicHost) { h = ho }))
-
 	// Configure routing and autorelay
-	var router routing.PeerRouting
 	if cfg.Routing != nil {
-		router, err = cfg.Routing(h)
-		if err != nil {
-			h.Close()
-			return nil, err
-		}
+		fxopts = append(fxopts,
+			fx.Provide(cfg.Routing),
+			fx.Decorate(func(h host.Host, router routing.PeerRouting) host.Host { return routed.Wrap(h, router) }),
+		)
 	}
 
 	// Note: h.AddrsFactory may be changed by relayFinder, but non-relay version is
@@ -377,22 +372,21 @@ func (cfg *Config) NewNode() (host.Host, error) {
 		)
 	}
 
+	var h host.Host
+	var bh *bhost.BasicHost
+	fxopts = append(fxopts, fx.Invoke(func(ho host.Host, bho *bhost.BasicHost) { h = ho; bh = bho }))
+
 	app := fx.New(fxopts...)
 	if err := app.Start(context.Background()); err != nil {
 		return nil, err
 	}
 
-	if err := cfg.addAutoNAT(h); err != nil {
+	if err := cfg.addAutoNAT(bh); err != nil {
 		h.Close()
 		return nil, err
 	}
 
-	var ho host.Host
-	ho = h
-	if router != nil {
-		ho = routed.Wrap(h, router)
-	}
-	return &closableHost{App: app, Host: ho}, nil
+	return &closableHost{App: app, Host: h}, nil
 }
 
 func (cfg *Config) addAutoNAT(h *bhost.BasicHost) error {
