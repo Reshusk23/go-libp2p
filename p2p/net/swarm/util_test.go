@@ -20,7 +20,7 @@ func TestIsFdConsuming(t *testing.T) {
 			isFdConsuming: true,
 		},
 		"quic": {
-			addr:          "/ip4/127.0.0.1/udp/0/quic-v1",
+			addr:          "/ip4/127.0.0.1/udp/0/quic",
 			isFdConsuming: false,
 		},
 		"addr-without-registered-transport": {

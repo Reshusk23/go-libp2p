@@ -189,7 +189,7 @@ func UnmarshalEnvelope(data []byte) (*Envelope, error) {
 }
 
 // Marshal returns a byte slice containing a serialized protobuf representation
-// of an Envelope.
+// of a Envelope.
 func (e *Envelope) Marshal() (res []byte, err error) {
 	defer func() { catch.HandlePanic(recover(), &err, "libp2p envelope marshal") }()
 	key, err := crypto.PublicKeyToProto(e.PublicKey)

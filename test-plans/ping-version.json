@@ -5,6 +5,7 @@
         "tcp",
         "ws",
         "wss",
+        "quic",
         "quic-v1",
         "webtransport"
     ],
@@ -13,6 +14,7 @@
         "noise"
     ],
     "muxers": [
+        "mplex",
         "yamux"
     ]
 }

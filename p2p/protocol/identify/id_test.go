@@ -29,7 +29,6 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/protocol/identify/pb"
 
 	mockClock "github.com/benbjohnson/clock"
-	"github.com/libp2p/go-libp2p-testing/race"
 	"github.com/libp2p/go-msgio/pbio"
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/stretchr/testify/assert"
@@ -107,9 +106,6 @@ func emitAddrChangeEvt(t *testing.T, h host.Host) {
 // this is because it used to be concurrent. Now, Dial wait till the
 // id service is done.
 func TestIDService(t *testing.T) {
-	if race.WithRace() {
-		t.Skip("This test modifies peerstore.RecentlyConnectedAddrTTL, which is racy.")
-	}
 	// This test is highly timing dependent, waiting on timeouts/expiration.
 	oldTTL := peerstore.RecentlyConnectedAddrTTL
 	peerstore.RecentlyConnectedAddrTTL = 500 * time.Millisecond
@@ -564,9 +560,6 @@ func TestSendPush(t *testing.T) {
 }
 
 func TestLargeIdentifyMessage(t *testing.T) {
-	if race.WithRace() {
-		t.Skip("setting peerstore.RecentlyConnectedAddrTTL is racy")
-	}
 	oldTTL := peerstore.RecentlyConnectedAddrTTL
 	peerstore.RecentlyConnectedAddrTTL = 500 * time.Millisecond
 	t.Cleanup(func() { peerstore.RecentlyConnectedAddrTTL = oldTTL })

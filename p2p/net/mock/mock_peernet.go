@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"sync"
 
-	"github.com/libp2p/go-libp2p/core/connmgr"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -29,9 +28,6 @@ type peernet struct {
 	connsByPeer map[peer.ID]map[*conn]struct{}
 	connsByLink map[*link]map[*conn]struct{}
 
-	// connection gater to check before dialing or accepting connections. May be nil to allow all.
-	gater connmgr.ConnectionGater
-
 	// implement network.Network
 	streamHandler network.StreamHandler
 
@@ -42,7 +38,7 @@ type peernet struct {
 }
 
 // newPeernet constructs a new peernet
-func newPeernet(m *mocknet, p peer.ID, opts PeerOptions, bus event.Bus) (*peernet, error) {
+func newPeernet(m *mocknet, p peer.ID, ps peerstore.Peerstore, bus event.Bus) (*peernet, error) {
 	emitter, err := bus.Emitter(&event.EvtPeerConnectednessChanged{})
 	if err != nil {
 		return nil, err
@@ -51,8 +47,7 @@ func newPeernet(m *mocknet, p peer.ID, opts PeerOptions, bus event.Bus) (*peerne
 	n := &peernet{
 		mocknet: m,
 		peer:    p,
-		ps:      opts.ps,
-		gater:   opts.gater,
+		ps:      ps,
 		emitter: emitter,
 
 		connsByPeer: map[peer.ID]map[*conn]struct{}{},
@@ -129,10 +124,6 @@ func (pn *peernet) connect(p peer.ID) (*conn, error) {
 	}
 	pn.RUnlock()
 
-	if pn.gater != nil && !pn.gater.InterceptPeerDial(p) {
-		log.Debugf("gater disallowed outbound connection to peer %s", p)
-		return nil, fmt.Errorf("%v connection gater disallowed connection to %v", pn.peer, p)
-	}
 	log.Debugf("%s (newly) dialing %s", pn.peer, p)
 
 	// ok, must create a new connection. we need a link
@@ -148,51 +139,18 @@ func (pn *peernet) connect(p peer.ID) (*conn, error) {
 
 	log.Debugf("%s dialing %s openingConn", pn.peer, p)
 	// create a new connection with link
-	return pn.openConn(p, l.(*link))
+	c := pn.openConn(p, l.(*link))
+	return c, nil
 }
 
-func (pn *peernet) openConn(r peer.ID, l *link) (*conn, error) {
+func (pn *peernet) openConn(r peer.ID, l *link) *conn {
 	lc, rc := l.newConnPair(pn)
-	addConnPair(pn, rc.net, lc, rc)
 	log.Debugf("%s opening connection to %s", pn.LocalPeer(), lc.RemotePeer())
-	abort := func() {
-		_ = lc.Close()
-		_ = rc.Close()
-	}
-	if pn.gater != nil && !pn.gater.InterceptAddrDial(lc.remote, lc.remoteAddr) {
-		abort()
-		return nil, fmt.Errorf("%v rejected dial to %v on addr %v", lc.local, lc.remote, lc.remoteAddr)
-	}
-	if rc.net.gater != nil && !rc.net.gater.InterceptAccept(rc) {
-		abort()
-		return nil, fmt.Errorf("%v rejected connection from %v", rc.local, rc.remote)
-	}
-	if err := checkSecureAndUpgrade(network.DirOutbound, pn.gater, lc); err != nil {
-		abort()
-		return nil, err
-	}
-	if err := checkSecureAndUpgrade(network.DirInbound, rc.net.gater, rc); err != nil {
-		abort()
-		return nil, err
-	}
+	addConnPair(pn, rc.net, lc, rc)
 
 	go rc.net.remoteOpenedConn(rc)
 	pn.addConn(lc)
-	return lc, nil
-}
-
-func checkSecureAndUpgrade(dir network.Direction, gater connmgr.ConnectionGater, c *conn) error {
-	if gater == nil {
-		return nil
-	}
-	if !gater.InterceptSecured(dir, c.remote, c) {
-		return fmt.Errorf("%v rejected secure handshake with %v", c.local, c.remote)
-	}
-	allow, _ := gater.InterceptUpgraded(c)
-	if !allow {
-		return fmt.Errorf("%v rejected upgrade with %v", c.local, c.remote)
-	}
-	return nil
+	return lc
 }
 
 // addConnPair adds connection to both peernets at the same time
@@ -400,7 +358,7 @@ func (pn *peernet) NewStream(ctx context.Context, p peer.ID) (network.Stream, er
 }
 
 // SetStreamHandler sets the new stream handler on the Network.
-// This operation is thread-safe.
+// This operation is threadsafe.
 func (pn *peernet) SetStreamHandler(h network.StreamHandler) {
 	pn.Lock()
 	pn.streamHandler = h

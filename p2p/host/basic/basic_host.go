@@ -591,7 +591,7 @@ func (h *BasicHost) EventBus() event.Bus {
 //
 //	host.Mux().SetHandler(proto, handler)
 //
-// (Thread-safe)
+// (Threadsafe)
 func (h *BasicHost) SetStreamHandler(pid protocol.ID, handler network.StreamHandler) {
 	h.Mux().AddHandler(pid, func(p protocol.ID, rwc io.ReadWriteCloser) error {
 		is := rwc.(network.Stream)
@@ -627,8 +627,11 @@ func (h *BasicHost) RemoveStreamHandler(pid protocol.ID) {
 // NewStream opens a new stream to given peer p, and writes a p2p/protocol
 // header with given protocol.ID. If there is no connection to p, attempts
 // to create one. If ProtocolID is "", writes no header.
-// (Thread-safe)
+// (Threadsafe)
 func (h *BasicHost) NewStream(ctx context.Context, p peer.ID, pids ...protocol.ID) (network.Stream, error) {
+	// Ensure we have a connection, with peer addresses resolved by the routing system (#207)
+	// It is not sufficient to let the underlying host connect, it will most likely not have
+	// any addresses for the peer without any prior connections.
 	// If the caller wants to prevent the host from dialing, it should use the NoDial option.
 	if nodial, _ := network.GetNoDial(ctx); !nodial {
 		err := h.Connect(ctx, peer.AddrInfo{ID: p})
@@ -644,7 +647,7 @@ func (h *BasicHost) NewStream(ctx context.Context, p peer.ID, pids ...protocol.I
 		if errors.Is(err, network.ErrNoConn) {
 			return nil, errors.New("connection failed")
 		}
-		return nil, fmt.Errorf("failed to open stream: %w", err)
+		return nil, err
 	}
 
 	// Wait for any in-progress identifies on the connection to finish. This
@@ -656,7 +659,7 @@ func (h *BasicHost) NewStream(ctx context.Context, p peer.ID, pids ...protocol.I
 	case <-h.ids.IdentifyWait(s.Conn()):
 	case <-ctx.Done():
 		_ = s.Reset()
-		return nil, fmt.Errorf("identify failed to complete: %w", ctx.Err())
+		return nil, ctx.Err()
 	}
 
 	pref, err := h.preferredProtocol(p, pids)
@@ -685,13 +688,13 @@ func (h *BasicHost) NewStream(ctx context.Context, p peer.ID, pids ...protocol.I
 	case err = <-errCh:
 		if err != nil {
 			s.Reset()
-			return nil, fmt.Errorf("failed to negotiate protocol: %w", err)
+			return nil, err
 		}
 	case <-ctx.Done():
 		s.Reset()
 		// wait for `SelectOneOf` to error out because of resetting the stream.
 		<-errCh
-		return nil, fmt.Errorf("failed to negotiate protocol: %w", ctx.Err())
+		return nil, ctx.Err()
 	}
 
 	s.SetProtocol(selected)
@@ -737,7 +740,7 @@ func (h *BasicHost) dialPeer(ctx context.Context, p peer.ID) error {
 	log.Debugf("host %s dialing %s", h.ID(), p)
 	c, err := h.Network().DialPeer(ctx, p)
 	if err != nil {
-		return fmt.Errorf("failed to dial: %w", err)
+		return err
 	}
 
 	// TODO: Consider removing this? On one hand, it's nice because we can
@@ -748,7 +751,7 @@ func (h *BasicHost) dialPeer(ctx context.Context, p peer.ID) error {
 	select {
 	case <-h.ids.IdentifyWait(c):
 	case <-ctx.Done():
-		return fmt.Errorf("identify failed to complete: %w", ctx.Err())
+		return ctx.Err()
 	}
 
 	log.Debugf("host %s finished dialing %s", h.ID(), p)
@@ -792,11 +795,10 @@ func (h *BasicHost) Addrs() []ma.Multiaddr {
 				continue
 			}
 			addrWithCerthash, added := tpt.AddCertHashes(addr)
+			addrs[i] = addrWithCerthash
 			if !added {
 				log.Debug("Couldn't add certhashes to webtransport multiaddr because we aren't listening on webtransport")
-				continue
 			}
-			addrs[i] = addrWithCerthash
 		}
 	}
 	return addrs
@@ -839,7 +841,7 @@ func (h *BasicHost) AllAddrs() []ma.Multiaddr {
 		finalAddrs = append(finalAddrs, resolved...)
 	}
 
-	finalAddrs = ma.Unique(finalAddrs)
+	finalAddrs = network.DedupAddrs(finalAddrs)
 
 	// use nat mappings if we have them
 	if h.natmgr != nil && h.natmgr.HasDiscoveredNAT() {
@@ -908,7 +910,7 @@ func (h *BasicHost) AllAddrs() []ma.Multiaddr {
 		}
 		finalAddrs = append(finalAddrs, observedAddrs...)
 	}
-	finalAddrs = ma.Unique(finalAddrs)
+	finalAddrs = network.DedupAddrs(finalAddrs)
 	finalAddrs = inferWebtransportAddrsFromQuic(finalAddrs)
 
 	return finalAddrs
@@ -943,17 +945,17 @@ func inferWebtransportAddrsFromQuic(in []ma.Multiaddr) []ma.Multiaddr {
 				// Remove certhashes
 				addr, _ = ma.SplitLast(addr)
 			}
-			webtransportAddrs[string(addr.Bytes())] = struct{}{}
+			webtransportAddrs[addr.String()] = struct{}{}
 			// Remove webtransport component, now it's a multiaddr that ends in /quic-v1
 			addr, _ = ma.SplitLast(addr)
 		}
 
 		if _, lastComponent := ma.SplitLast(addr); lastComponent.Protocol().Code == ma.P_QUIC_V1 {
-			bytes := addr.Bytes()
-			if _, ok := quicOrWebtransportAddrs[string(bytes)]; ok {
+			addrStr := addr.String()
+			if _, ok := quicOrWebtransportAddrs[addrStr]; ok {
 				foundSameListeningAddr = true
 			} else {
-				quicOrWebtransportAddrs[string(bytes)] = struct{}{}
+				quicOrWebtransportAddrs[addrStr] = struct{}{}
 			}
 		}
 	}
@@ -975,7 +977,7 @@ func inferWebtransportAddrsFromQuic(in []ma.Multiaddr) []ma.Multiaddr {
 		if _, lastComponent := ma.SplitLast(addr); lastComponent.Protocol().Code == ma.P_QUIC_V1 {
 			// Convert quic to webtransport
 			addr = addr.Encapsulate(wtComponent)
-			if _, ok := webtransportAddrs[string(addr.Bytes())]; ok {
+			if _, ok := webtransportAddrs[addr.String()]; ok {
 				// We already have this address
 				continue
 			}

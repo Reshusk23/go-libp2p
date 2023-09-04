@@ -136,9 +136,6 @@ func (bh *BlankHost) Connect(ctx context.Context, ai peer.AddrInfo) error {
 	}
 
 	_, err := bh.Network().DialPeer(ctx, ai.ID)
-	if err != nil {
-		return fmt.Errorf("failed to dial: %w", err)
-	}
 	return err
 }
 
@@ -153,13 +150,13 @@ func (bh *BlankHost) ID() peer.ID {
 func (bh *BlankHost) NewStream(ctx context.Context, p peer.ID, protos ...protocol.ID) (network.Stream, error) {
 	s, err := bh.n.NewStream(ctx, p)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open stream: %w", err)
+		return nil, err
 	}
 
 	selected, err := mstream.SelectOneOf(protos, s)
 	if err != nil {
 		s.Reset()
-		return nil, fmt.Errorf("failed to negotiate protocol: %w", err)
+		return nil, err
 	}
 
 	s.SetProtocol(selected)

@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
+	rcmgrObs "github.com/libp2p/go-libp2p/p2p/host/resource-manager/obs"
 )
 
 const ClientCount = 32
@@ -23,13 +24,12 @@ const ClientCount = 32
 func main() {
 	http.Handle("/metrics", promhttp.Handler())
 	go func() {
-		http.Handle("/debug/metrics/prometheus", promhttp.Handler())
-		log.Fatal(http.ListenAndServe(":5001", nil))
+		http.ListenAndServe(":2112", nil)
 	}()
 
-	rcmgr.MustRegisterWith(prometheus.DefaultRegisterer)
+	rcmgrObs.MustRegisterWith(prometheus.DefaultRegisterer)
 
-	str, err := rcmgr.NewStatsTraceReporter()
+	str, err := rcmgrObs.NewStatsTraceReporter()
 	if err != nil {
 		log.Fatal(err)
 	}

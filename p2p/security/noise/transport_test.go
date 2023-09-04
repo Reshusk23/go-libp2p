@@ -212,10 +212,7 @@ func TestPeerIDMismatchOutboundFailsHandshake(t *testing.T) {
 
 	initErr := <-errChan
 	require.Error(t, initErr, "expected initiator to fail with peer ID mismatch error")
-	var mismatchErr sec.ErrPeerIDMismatch
-	require.ErrorAs(t, initErr, &mismatchErr)
-	require.Equal(t, peer.ID("a-random-peer-id"), mismatchErr.Expected)
-	require.Equal(t, respTransport.localID, mismatchErr.Actual)
+	require.Contains(t, initErr.Error(), "but remote key matches")
 }
 
 func TestPeerIDMismatchInboundFailsHandshake(t *testing.T) {
@@ -234,10 +231,6 @@ func TestPeerIDMismatchInboundFailsHandshake(t *testing.T) {
 
 	_, err := respTransport.SecureInbound(context.Background(), resp, "a-random-peer-id")
 	require.Error(t, err, "expected responder to fail with peer ID mismatch error")
-	var mismatchErr sec.ErrPeerIDMismatch
-	require.ErrorAs(t, err, &mismatchErr)
-	require.Equal(t, peer.ID("a-random-peer-id"), mismatchErr.Expected)
-	require.Equal(t, initTransport.localID, mismatchErr.Actual)
 	<-done
 }
 

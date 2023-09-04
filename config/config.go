@@ -26,7 +26,7 @@ import (
 	blankhost "github.com/libp2p/go-libp2p/p2p/host/blank"
 	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
 	"github.com/libp2p/go-libp2p/p2p/host/peerstore/pstoremem"
-	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
+	rcmgrObs "github.com/libp2p/go-libp2p/p2p/host/resource-manager/obs"
 	routed "github.com/libp2p/go-libp2p/p2p/host/routed"
 	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	tptu "github.com/libp2p/go-libp2p/p2p/net/upgrader"
@@ -126,8 +126,6 @@ type Config struct {
 	PrometheusRegisterer prometheus.Registerer
 
 	DialRanker network.DialRanker
-
-	SwarmOpts []swarm.Option
 }
 
 func (cfg *Config) makeSwarm(eventBus event.Bus, enableMetrics bool) (*swarm.Swarm, error) {
@@ -162,7 +160,7 @@ func (cfg *Config) makeSwarm(eventBus event.Bus, enableMetrics bool) (*swarm.Swa
 		return nil, err
 	}
 
-	opts := cfg.SwarmOpts
+	opts := make([]swarm.Option, 0, 6)
 	if cfg.Reporter != nil {
 		opts = append(opts, swarm.WithMetrics(cfg.Reporter))
 	}
@@ -178,10 +176,11 @@ func (cfg *Config) makeSwarm(eventBus event.Bus, enableMetrics bool) (*swarm.Swa
 	if cfg.MultiaddrResolver != nil {
 		opts = append(opts, swarm.WithMultiaddrResolver(cfg.MultiaddrResolver))
 	}
-	if cfg.DialRanker != nil {
-		opts = append(opts, swarm.WithDialRanker(cfg.DialRanker))
+	dialRanker := cfg.DialRanker
+	if dialRanker == nil {
+		dialRanker = swarm.NoDelayDialRanker
 	}
-
+	opts = append(opts, swarm.WithDialRanker(dialRanker))
 	if enableMetrics {
 		opts = append(opts,
 			swarm.WithMetricsTracer(swarm.NewMetricsTracer(swarm.WithRegisterer(cfg.PrometheusRegisterer))))
@@ -302,7 +301,7 @@ func (cfg *Config) NewNode() (host.Host, error) {
 	}
 
 	if !cfg.DisableMetrics {
-		rcmgr.MustRegisterWith(cfg.PrometheusRegisterer)
+		rcmgrObs.MustRegisterWith(cfg.PrometheusRegisterer)
 	}
 
 	h, err := bhost.NewHost(swrm, &bhost.HostOpts{
@@ -419,11 +418,6 @@ func (cfg *Config) NewNode() (host.Host, error) {
 			PeerKey:            autonatPrivKey,
 			Peerstore:          ps,
 			DialRanker:         swarm.NoDelayDialRanker,
-			SwarmOpts: []swarm.Option{
-				// It is better to disable black hole detection and just attempt a dial for autonat
-				swarm.WithUDPBlackHoleConfig(false, 0, 0),
-				swarm.WithIPv6BlackHoleConfig(false, 0, 0),
-			},
 		}
 
 		dialer, err := autoNatCfg.makeSwarm(eventbus.NewBus(), false)

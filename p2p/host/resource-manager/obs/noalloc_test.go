@@ -1,6 +1,6 @@
 //go:build nocover
 
-package rcmgr
+package obs
 
 import (
 	"math/rand"
@@ -8,25 +8,26 @@ import (
 	"testing"
 	"time"
 
+	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
-func randomTraceEvt(rng *rand.Rand) TraceEvt {
+func randomTraceEvt(rng *rand.Rand) rcmgr.TraceEvt {
 	// Possibly non-sensical
-	typs := []TraceEvtTyp{
-		TraceStartEvt,
-		TraceCreateScopeEvt,
-		TraceDestroyScopeEvt,
-		TraceReserveMemoryEvt,
-		TraceBlockReserveMemoryEvt,
-		TraceReleaseMemoryEvt,
-		TraceAddStreamEvt,
-		TraceBlockAddStreamEvt,
-		TraceRemoveStreamEvt,
-		TraceAddConnEvt,
-		TraceBlockAddConnEvt,
-		TraceRemoveConnEvt,
+	typs := []rcmgr.TraceEvtTyp{
+		rcmgr.TraceStartEvt,
+		rcmgr.TraceCreateScopeEvt,
+		rcmgr.TraceDestroyScopeEvt,
+		rcmgr.TraceReserveMemoryEvt,
+		rcmgr.TraceBlockReserveMemoryEvt,
+		rcmgr.TraceReleaseMemoryEvt,
+		rcmgr.TraceAddStreamEvt,
+		rcmgr.TraceBlockAddStreamEvt,
+		rcmgr.TraceRemoveStreamEvt,
+		rcmgr.TraceAddConnEvt,
+		rcmgr.TraceBlockAddConnEvt,
+		rcmgr.TraceRemoveConnEvt,
 	}
 
 	names := []string{
@@ -42,7 +43,7 @@ func randomTraceEvt(rng *rand.Rand) TraceEvt {
 		"service:libp2p.autonat.peer:12D3Koo",
 	}
 
-	return TraceEvt{
+	return rcmgr.TraceEvt{
 		Type:       typs[rng.Intn(len(typs))],
 		Name:       names[rng.Intn(len(names))],
 		DeltaOut:   rng.Intn(5),
@@ -59,7 +60,7 @@ func randomTraceEvt(rng *rand.Rand) TraceEvt {
 
 }
 
-var regOnce sync.Once
+var registerOnce sync.Once
 
 func BenchmarkMetricsRecording(b *testing.B) {
 	b.ReportAllocs()
@@ -69,7 +70,7 @@ func BenchmarkMetricsRecording(b *testing.B) {
 	})
 
 	evtCount := 10000
-	evts := make([]TraceEvt, evtCount)
+	evts := make([]rcmgr.TraceEvt, evtCount)
 	rng := rand.New(rand.NewSource(int64(b.N)))
 	for i := 0; i < evtCount; i++ {
 		evts[i] = randomTraceEvt(rng)
@@ -91,7 +92,7 @@ func TestNoAllocsNoCover(t *testing.T) {
 	require.NoError(t, err)
 
 	evtCount := 10_000
-	evts := make([]TraceEvt, 0, evtCount)
+	evts := make([]rcmgr.TraceEvt, 0, evtCount)
 	rng := rand.New(rand.NewSource(1))
 
 	for i := 0; i < evtCount; i++ {

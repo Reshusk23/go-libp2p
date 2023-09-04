@@ -376,10 +376,7 @@ func TestPeerIDMismatch(t *testing.T) {
 		thirdPartyID, _ := createPeer(t)
 		_, err = clientTransport.SecureOutbound(context.Background(), clientInsecureConn, thirdPartyID)
 		require.Error(t, err)
-		var mismatchErr sec.ErrPeerIDMismatch
-		require.ErrorAs(t, err, &mismatchErr)
-		require.Equal(t, thirdPartyID, mismatchErr.Expected)
-		require.Equal(t, serverID, mismatchErr.Actual)
+		require.Contains(t, err.Error(), "peer IDs don't match")
 
 		var serverErr error
 		select {
@@ -395,8 +392,8 @@ func TestPeerIDMismatch(t *testing.T) {
 		clientInsecureConn, serverInsecureConn := connect(t)
 
 		errChan := make(chan error)
-		thirdPartyID, _ := createPeer(t)
 		go func() {
+			thirdPartyID, _ := createPeer(t)
 			// expect the wrong peer ID
 			_, err := serverTransport.SecureInbound(context.Background(), serverInsecureConn, thirdPartyID)
 			errChan <- err
@@ -415,10 +412,7 @@ func TestPeerIDMismatch(t *testing.T) {
 			t.Fatal("expected handshake to return on the server side")
 		}
 		require.Error(t, serverErr)
-		var mismatchErr sec.ErrPeerIDMismatch
-		require.ErrorAs(t, serverErr, &mismatchErr)
-		require.Equal(t, thirdPartyID, mismatchErr.Expected)
-		require.Equal(t, clientTransport.localPeer, mismatchErr.Actual)
+		require.Contains(t, serverErr.Error(), "peer IDs don't match")
 	})
 }
 

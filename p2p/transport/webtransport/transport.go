@@ -295,12 +295,9 @@ func (t *transport) CanDial(addr ma.Multiaddr) bool {
 }
 
 func (t *transport) Listen(laddr ma.Multiaddr) (tpt.Listener, error) {
-	isWebTransport, certhashCount := IsWebtransportMultiaddr(laddr)
+	isWebTransport, _ := IsWebtransportMultiaddr(laddr)
 	if !isWebTransport {
 		return nil, fmt.Errorf("cannot listen on non-WebTransport addr: %s", laddr)
-	}
-	if certhashCount > 0 {
-		return nil, fmt.Errorf("cannot listen on a specific certhash non-WebTransport addr: %s", laddr)
 	}
 	if t.staticTLSConf == nil {
 		t.listenOnce.Do(func() {

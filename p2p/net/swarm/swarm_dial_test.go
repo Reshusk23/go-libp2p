@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"errors"
 	"net"
 	"sort"
 	"testing"
@@ -66,7 +65,7 @@ func TestAddrsForDial(t *testing.T) {
 	ps.AddAddr(otherPeer, ma.StringCast("/dns4/example.com/tcp/1234/wss"), time.Hour)
 
 	ctx := context.Background()
-	mas, _, err := s.addrsForDial(ctx, otherPeer)
+	mas, err := s.addrsForDial(ctx, otherPeer)
 	require.NoError(t, err)
 
 	require.NotZero(t, len(mas))
@@ -111,7 +110,7 @@ func TestDedupAddrsForDial(t *testing.T) {
 	ps.AddAddr(otherPeer, ma.StringCast("/ip4/1.2.3.4/tcp/1234"), time.Hour)
 
 	ctx := context.Background()
-	mas, _, err := s.addrsForDial(ctx, otherPeer)
+	mas, err := s.addrsForDial(ctx, otherPeer)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, len(mas))
@@ -184,7 +183,7 @@ func TestAddrResolution(t *testing.T) {
 
 	tctx, cancel := context.WithTimeout(ctx, time.Millisecond*100)
 	defer cancel()
-	mas, _, err := s.addrsForDial(tctx, p1)
+	mas, err := s.addrsForDial(tctx, p1)
 	require.NoError(t, err)
 
 	require.Len(t, mas, 1)
@@ -242,7 +241,7 @@ func TestAddrResolutionRecursive(t *testing.T) {
 	tctx, cancel := context.WithTimeout(ctx, time.Millisecond*100)
 	defer cancel()
 	s.Peerstore().AddAddrs(pi1.ID, pi1.Addrs, peerstore.TempAddrTTL)
-	_, _, err = s.addrsForDial(tctx, p1)
+	_, err = s.addrsForDial(tctx, p1)
 	require.NoError(t, err)
 
 	addrs1 := s.Peerstore().Addrs(pi1.ID)
@@ -254,7 +253,7 @@ func TestAddrResolutionRecursive(t *testing.T) {
 	require.NoError(t, err)
 
 	s.Peerstore().AddAddrs(pi2.ID, pi2.Addrs, peerstore.TempAddrTTL)
-	_, _, err = s.addrsForDial(tctx, p2)
+	_, err = s.addrsForDial(tctx, p2)
 	// This never resolves to a good address
 	require.Equal(t, ErrNoGoodAddresses, err)
 
@@ -264,15 +263,15 @@ func TestAddrResolutionRecursive(t *testing.T) {
 }
 
 func TestAddrsForDialFiltering(t *testing.T) {
-	q1 := ma.StringCast("/ip4/1.2.3.4/udp/1/quic-v1")
+	q1 := ma.StringCast("/ip4/1.2.3.4/udp/1/quic")
 	q1v1 := ma.StringCast("/ip4/1.2.3.4/udp/1/quic-v1")
 	wt1 := ma.StringCast("/ip4/1.2.3.4/udp/1/quic-v1/webtransport/")
 
-	q2 := ma.StringCast("/ip4/1.2.3.4/udp/2/quic-v1")
+	q2 := ma.StringCast("/ip4/1.2.3.4/udp/2/quic")
 	q2v1 := ma.StringCast("/ip4/1.2.3.4/udp/2/quic-v1")
 	wt2 := ma.StringCast("/ip4/1.2.3.4/udp/2/quic-v1/webtransport/")
 
-	q3 := ma.StringCast("/ip4/1.2.3.4/udp/3/quic-v1")
+	q3 := ma.StringCast("/ip4/1.2.3.4/udp/3/quic")
 
 	t1 := ma.StringCast("/ip4/1.2.3.4/tcp/1")
 	ws1 := ma.StringCast("/ip4/1.2.3.4/tcp/1/ws")
@@ -316,7 +315,7 @@ func TestAddrsForDialFiltering(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s.Peerstore().ClearAddrs(p1)
 			s.Peerstore().AddAddrs(p1, tc.input, peerstore.PermanentAddrTTL)
-			result, _, err := s.addrsForDial(ctx, p1)
+			result, err := s.addrsForDial(ctx, p1)
 			require.NoError(t, err)
 			sort.Slice(result, func(i, j int) bool { return bytes.Compare(result[i].Bytes(), result[j].Bytes()) < 0 })
 			sort.Slice(tc.output, func(i, j int) bool { return bytes.Compare(tc.output[i].Bytes(), tc.output[j].Bytes()) < 0 })
@@ -330,47 +329,4 @@ func TestAddrsForDialFiltering(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestBlackHoledAddrBlocked(t *testing.T) {
-	resolver, err := madns.NewResolver()
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := newTestSwarmWithResolver(t, resolver)
-	defer s.Close()
-
-	n := 3
-	s.bhd.ipv6 = &blackHoleFilter{n: n, minSuccesses: 1, name: "IPv6"}
-
-	// all dials to the address will fail. RFC6666 Discard Prefix
-	addr := ma.StringCast("/ip6/0100::1/tcp/54321/")
-
-	p, err := test.RandPeerID()
-	if err != nil {
-		t.Error(err)
-	}
-	s.Peerstore().AddAddr(p, addr, peerstore.PermanentAddrTTL)
-
-	// do 1 extra dial to ensure that the blackHoleDetector state is updated since it
-	// happens in a different goroutine
-	for i := 0; i < n+1; i++ {
-		s.backf.Clear(p)
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		conn, err := s.DialPeer(ctx, p)
-		if err == nil || conn != nil {
-			t.Fatalf("expected dial to fail")
-		}
-		cancel()
-	}
-	s.backf.Clear(p)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	conn, err := s.DialPeer(ctx, p)
-	require.Nil(t, conn)
-	var de *DialError
-	if !errors.As(err, &de) {
-		t.Fatalf("expected to receive an error of type *DialError, got %s of type %T", err, err)
-	}
-	require.ErrorIs(t, err, ErrDialRefusedBlackHole)
 }

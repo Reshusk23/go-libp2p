@@ -1,57 +1,29 @@
 package quicreuse
 
 import (
-	"context"
-	"crypto/tls"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/google/gopacket/routing"
 	"github.com/libp2p/go-netroute"
-	"github.com/quic-go/quic-go"
 )
 
-type refCountedQuicTransport interface {
-	LocalAddr() net.Addr
+type pConn interface {
+	net.PacketConn
 
-	// Used to send packets directly around QUIC. Useful for hole punching.
-	WriteTo([]byte, net.Addr) (int, error)
-
-	Close() error
-
-	// count transport reference
+	// count conn reference
 	DecreaseCount()
 	IncreaseCount()
-
-	Dial(ctx context.Context, addr net.Addr, tlsConf *tls.Config, conf *quic.Config) (quic.Connection, error)
-	Listen(tlsConf *tls.Config, conf *quic.Config) (*quic.Listener, error)
 }
 
-type singleOwnerTransport struct {
-	quic.Transport
-
-	// Used to write packets directly around QUIC.
-	packetConn net.PacketConn
+type noreuseConn struct {
+	*net.UDPConn
 }
 
-func (c *singleOwnerTransport) IncreaseCount() {}
-func (c *singleOwnerTransport) DecreaseCount() {
-	c.Transport.Close()
-}
-
-func (c *singleOwnerTransport) LocalAddr() net.Addr {
-	return c.Transport.Conn.LocalAddr()
-}
-
-func (c *singleOwnerTransport) Close() error {
-	// TODO(when we drop support for go 1.19) use errors.Join
-	c.Transport.Close()
-	return c.packetConn.Close()
-}
-
-func (c *singleOwnerTransport) WriteTo(b []byte, addr net.Addr) (int, error) {
-	return c.Transport.WriteTo(b, addr)
+func (c *noreuseConn) IncreaseCount() {}
+func (c *noreuseConn) DecreaseCount() {
+	c.UDPConn.Close()
 }
 
 // Constant. Defined as variables to simplify testing.
@@ -60,39 +32,26 @@ var (
 	maxUnusedDuration      = 10 * time.Second
 )
 
-type refcountedTransport struct {
-	quic.Transport
-
-	// Used to write packets directly around QUIC.
-	packetConn net.PacketConn
+type reuseConn struct {
+	*net.UDPConn
 
 	mutex       sync.Mutex
 	refCount    int
 	unusedSince time.Time
 }
 
-func (c *refcountedTransport) IncreaseCount() {
+func newReuseConn(conn *net.UDPConn) *reuseConn {
+	return &reuseConn{UDPConn: conn}
+}
+
+func (c *reuseConn) IncreaseCount() {
 	c.mutex.Lock()
 	c.refCount++
 	c.unusedSince = time.Time{}
 	c.mutex.Unlock()
 }
 
-func (c *refcountedTransport) Close() error {
-	// TODO(when we drop support for go 1.19) use errors.Join
-	c.Transport.Close()
-	return c.packetConn.Close()
-}
-
-func (c *refcountedTransport) WriteTo(b []byte, addr net.Addr) (int, error) {
-	return c.Transport.WriteTo(b, addr)
-}
-
-func (c *refcountedTransport) LocalAddr() net.Addr {
-	return c.Transport.Conn.LocalAddr()
-}
-
-func (c *refcountedTransport) DecreaseCount() {
+func (c *reuseConn) DecreaseCount() {
 	c.mutex.Lock()
 	c.refCount--
 	if c.refCount == 0 {
@@ -101,7 +60,7 @@ func (c *refcountedTransport) DecreaseCount() {
 	c.mutex.Unlock()
 }
 
-func (c *refcountedTransport) ShouldGarbageCollect(now time.Time) bool {
+func (c *reuseConn) ShouldGarbageCollect(now time.Time) bool {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	return !c.unusedSince.IsZero() && c.unusedSince.Add(maxUnusedDuration).Before(now)
@@ -114,27 +73,22 @@ type reuse struct {
 	gcStopChan chan struct{}
 
 	routes  routing.Router
-	unicast map[string] /* IP.String() */ map[int] /* port */ *refcountedTransport
-	// globalListeners contains transports that are listening on 0.0.0.0 / ::
-	globalListeners map[int]*refcountedTransport
-	// globalDialers contains transports that we've dialed out from. These transports are listening on 0.0.0.0 / ::
-	// On Dial, transports are reused from this map if no transport is available in the globalListeners
-	// On Listen, transports are reused from this map if the requested port is 0, and then moved to globalListeners
-	globalDialers map[int]*refcountedTransport
-
-	statelessResetKey *quic.StatelessResetKey
-	metricsTracer     *metricsTracer
+	unicast map[string] /* IP.String() */ map[int] /* port */ *reuseConn
+	// globalListeners contains connections that are listening on 0.0.0.0 / ::
+	globalListeners map[int]*reuseConn
+	// globalDialers contains connections that we've dialed out from. These connections are listening on 0.0.0.0 / ::
+	// On Dial, connections are reused from this map if no connection is available in the globalListeners
+	// On Listen, connections are reused from this map if the requested port is 0, and then moved to globalListeners
+	globalDialers map[int]*reuseConn
 }
 
-func newReuse(srk *quic.StatelessResetKey, mt *metricsTracer) *reuse {
+func newReuse() *reuse {
 	r := &reuse{
-		unicast:           make(map[string]map[int]*refcountedTransport),
-		globalListeners:   make(map[int]*refcountedTransport),
-		globalDialers:     make(map[int]*refcountedTransport),
-		closeChan:         make(chan struct{}),
-		gcStopChan:        make(chan struct{}),
-		statelessResetKey: srk,
-		metricsTracer:     mt,
+		unicast:         make(map[string]map[int]*reuseConn),
+		globalListeners: make(map[int]*reuseConn),
+		globalDialers:   make(map[int]*reuseConn),
+		closeChan:       make(chan struct{}),
+		gcStopChan:      make(chan struct{}),
 	}
 	go r.gc()
 	return r
@@ -143,15 +97,15 @@ func newReuse(srk *quic.StatelessResetKey, mt *metricsTracer) *reuse {
 func (r *reuse) gc() {
 	defer func() {
 		r.mutex.Lock()
-		for _, tr := range r.globalListeners {
-			tr.Close()
+		for _, conn := range r.globalListeners {
+			conn.Close()
 		}
-		for _, tr := range r.globalDialers {
-			tr.Close()
+		for _, conn := range r.globalDialers {
+			conn.Close()
 		}
-		for _, trs := range r.unicast {
-			for _, tr := range trs {
-				tr.Close()
+		for _, conns := range r.unicast {
+			for _, conn := range conns {
+				conn.Close()
 			}
 		}
 		r.mutex.Unlock()
@@ -167,28 +121,28 @@ func (r *reuse) gc() {
 		case <-ticker.C:
 			now := time.Now()
 			r.mutex.Lock()
-			for key, tr := range r.globalListeners {
-				if tr.ShouldGarbageCollect(now) {
-					tr.Close()
+			for key, conn := range r.globalListeners {
+				if conn.ShouldGarbageCollect(now) {
+					conn.Close()
 					delete(r.globalListeners, key)
 				}
 			}
-			for key, tr := range r.globalDialers {
-				if tr.ShouldGarbageCollect(now) {
-					tr.Close()
+			for key, conn := range r.globalDialers {
+				if conn.ShouldGarbageCollect(now) {
+					conn.Close()
 					delete(r.globalDialers, key)
 				}
 			}
-			for ukey, trs := range r.unicast {
-				for key, tr := range trs {
-					if tr.ShouldGarbageCollect(now) {
-						tr.Close()
-						delete(trs, key)
+			for ukey, conns := range r.unicast {
+				for key, conn := range conns {
+					if conn.ShouldGarbageCollect(now) {
+						conn.Close()
+						delete(conns, key)
 					}
 				}
-				if len(trs) == 0 {
+				if len(conns) == 0 {
 					delete(r.unicast, ukey)
-					// If we've dropped all transports with a unicast binding,
+					// If we've dropped all connections with a unicast binding,
 					// assume our routes may have changed.
 					if len(r.unicast) == 0 {
 						r.routes = nil
@@ -204,7 +158,7 @@ func (r *reuse) gc() {
 	}
 }
 
-func (r *reuse) TransportForDial(network string, raddr *net.UDPAddr) (*refcountedTransport, error) {
+func (r *reuse) Dial(network string, raddr *net.UDPAddr) (*reuseConn, error) {
 	var ip *net.IP
 
 	// Only bother looking up the source address if we actually _have_ non 0.0.0.0 listeners.
@@ -224,37 +178,37 @@ func (r *reuse) TransportForDial(network string, raddr *net.UDPAddr) (*refcounte
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	tr, err := r.transportForDialLocked(network, ip)
+	conn, err := r.dialLocked(network, ip)
 	if err != nil {
 		return nil, err
 	}
-	tr.IncreaseCount()
-	return tr, nil
+	conn.IncreaseCount()
+	return conn, nil
 }
 
-func (r *reuse) transportForDialLocked(network string, source *net.IP) (*refcountedTransport, error) {
+func (r *reuse) dialLocked(network string, source *net.IP) (*reuseConn, error) {
 	if source != nil {
-		// We already have at least one suitable transport...
-		if trs, ok := r.unicast[source.String()]; ok {
+		// We already have at least one suitable connection...
+		if conns, ok := r.unicast[source.String()]; ok {
 			// ... we don't care which port we're dialing from. Just use the first.
-			for _, tr := range trs {
-				return tr, nil
+			for _, c := range conns {
+				return c, nil
 			}
 		}
 	}
 
-	// Use a transport listening on 0.0.0.0 (or ::).
+	// Use a connection listening on 0.0.0.0 (or ::).
 	// Again, we don't care about the port number.
-	for _, tr := range r.globalListeners {
-		return tr, nil
+	for _, conn := range r.globalListeners {
+		return conn, nil
 	}
 
-	// Use a transport we've previously dialed from
-	for _, tr := range r.globalDialers {
-		return tr, nil
+	// Use a connection we've previously dialed from
+	for _, conn := range r.globalDialers {
+		return conn, nil
 	}
 
-	// We don't have a transport that we can use for dialing.
+	// We don't have a connection that we can use for dialing.
 	// Dial a new connection from a random port.
 	var addr *net.UDPAddr
 	switch network {
@@ -267,48 +221,42 @@ func (r *reuse) transportForDialLocked(network string, source *net.IP) (*refcoun
 	if err != nil {
 		return nil, err
 	}
-	tr := &refcountedTransport{Transport: quic.Transport{
-		Conn:              conn,
-		StatelessResetKey: r.statelessResetKey,
-	}, packetConn: conn}
-	if r.metricsTracer != nil {
-		tr.Transport.Tracer = r.metricsTracer
-	}
-	r.globalDialers[conn.LocalAddr().(*net.UDPAddr).Port] = tr
-	return tr, nil
+	rconn := newReuseConn(conn)
+	r.globalDialers[conn.LocalAddr().(*net.UDPAddr).Port] = rconn
+	return rconn, nil
 }
 
-func (r *reuse) TransportForListen(network string, laddr *net.UDPAddr) (*refcountedTransport, error) {
+func (r *reuse) Listen(network string, laddr *net.UDPAddr) (*reuseConn, error) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	// Check if we can reuse a transport we have already dialed out from.
-	// We reuse a transport from globalDialers when the requested port is 0 or the requested
+	// Check if we can reuse a connection we have already dialed out from.
+	// We reuse a connection from globalDialers when the requested port is 0 or the requested
 	// port is already in the globalDialers.
-	// If we are reusing a transport from globalDialers, we move the globalDialers entry to
+	// If we are reusing a connection from globalDialers, we move the globalDialers entry to
 	// globalListeners
 	if laddr.IP.IsUnspecified() {
-		var rTr *refcountedTransport
+		var rconn *reuseConn
 		var localAddr *net.UDPAddr
 
 		if laddr.Port == 0 {
-			// the requested port is 0, we can reuse any transport
-			for _, tr := range r.globalDialers {
-				rTr = tr
-				localAddr = rTr.LocalAddr().(*net.UDPAddr)
+			// the requested port is 0, we can reuse any connection
+			for _, conn := range r.globalDialers {
+				rconn = conn
+				localAddr = rconn.UDPConn.LocalAddr().(*net.UDPAddr)
 				delete(r.globalDialers, localAddr.Port)
 				break
 			}
 		} else if _, ok := r.globalDialers[laddr.Port]; ok {
-			rTr = r.globalDialers[laddr.Port]
-			localAddr = rTr.LocalAddr().(*net.UDPAddr)
+			rconn = r.globalDialers[laddr.Port]
+			localAddr = rconn.UDPConn.LocalAddr().(*net.UDPAddr)
 			delete(r.globalDialers, localAddr.Port)
 		}
 		// found a match
-		if rTr != nil {
-			rTr.IncreaseCount()
-			r.globalListeners[localAddr.Port] = rTr
-			return rTr, nil
+		if rconn != nil {
+			rconn.IncreaseCount()
+			r.globalListeners[localAddr.Port] = rconn
+			return rconn, nil
 		}
 	}
 
@@ -317,27 +265,21 @@ func (r *reuse) TransportForListen(network string, laddr *net.UDPAddr) (*refcoun
 		return nil, err
 	}
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	tr := &refcountedTransport{Transport: quic.Transport{
-		Conn:              conn,
-		StatelessResetKey: r.statelessResetKey,
-	}, packetConn: conn}
-	if r.metricsTracer != nil {
-		tr.Transport.Tracer = r.metricsTracer
-	}
+	rconn := newReuseConn(conn)
 
-	tr.IncreaseCount()
+	rconn.IncreaseCount()
 
 	// Deal with listen on a global address
 	if localAddr.IP.IsUnspecified() {
 		// The kernel already checked that the laddr is not already listen
 		// so we need not check here (when we create ListenUDP).
-		r.globalListeners[localAddr.Port] = tr
-		return tr, nil
+		r.globalListeners[localAddr.Port] = rconn
+		return rconn, nil
 	}
 
 	// Deal with listen on a unicast address
 	if _, ok := r.unicast[localAddr.IP.String()]; !ok {
-		r.unicast[localAddr.IP.String()] = make(map[int]*refcountedTransport)
+		r.unicast[localAddr.IP.String()] = make(map[int]*reuseConn)
 		// Assume the system's routes may have changed if we're adding a new listener.
 		// Ignore the error, there's nothing we can do.
 		r.routes, _ = netroute.New()
@@ -345,8 +287,8 @@ func (r *reuse) TransportForListen(network string, laddr *net.UDPAddr) (*refcoun
 
 	// The kernel already checked that the laddr is not already listen
 	// so we need not check here (when we create ListenUDP).
-	r.unicast[localAddr.IP.String()][localAddr.Port] = tr
-	return tr, nil
+	r.unicast[localAddr.IP.String()][localAddr.Port] = rconn
+	return rconn, nil
 }
 
 func (r *reuse) Close() error {

@@ -3,10 +3,9 @@ package identify
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
-
-	"golang.org/x/exp/slices"
 
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -212,16 +211,17 @@ func (oas *ObservedAddrManager) filter(observedAddrs []*observedAddr) []ma.Multi
 	for pat := range pmap {
 		s := pmap[pat]
 
-		slices.SortFunc(s, func(first, second *observedAddr) int {
-			// We prefer inbound connection observations over outbound.
+		// We prefer inbound connection observations over outbound.
+		// For ties, we prefer the ones with more votes.
+		sort.Slice(s, func(i int, j int) bool {
+			first := s[i]
+			second := s[j]
+
 			if first.numInbound > second.numInbound {
-				return -1
+				return true
 			}
-			// For ties, we prefer the ones with more votes.
-			if first.numInbound == second.numInbound && len(first.seenBy) > len(second.seenBy) {
-				return -1
-			}
-			return 1
+
+			return len(first.seenBy) > len(second.seenBy)
 		})
 
 		for i := 0; i < maxObservedAddrsPerIPAndTransport && i < len(s); i++ {
@@ -375,11 +375,6 @@ func shouldRecordObservation(host addrsProvider, network listenAddrsProvider, co
 	// Ignore observations from loopback nodes. We already know our loopback
 	// addresses.
 	if manet.IsIPLoopback(observed) {
-		return false
-	}
-
-	// Provided by NAT64 peers, these addresses are specific to the peer and not publicly routable
-	if manet.IsNAT64IPv4ConvertedIPv6Addr(observed) {
 		return false
 	}
 
